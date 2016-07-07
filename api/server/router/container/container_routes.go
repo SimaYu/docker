@@ -15,10 +15,10 @@ import (
 	"github.com/docker/docker/api/types/backend"
 	"github.com/docker/docker/pkg/ioutils"
 	"github.com/docker/docker/pkg/signal"
-	"github.com/docker/docker/pkg/term"
 	"github.com/docker/engine-api/types"
 	"github.com/docker/engine-api/types/container"
 	"github.com/docker/engine-api/types/filters"
+	"github.com/docker/engine-api/types/versions"
 	"golang.org/x/net/context"
 	"golang.org/x/net/websocket"
 )
@@ -99,6 +99,7 @@ func (s *containerRouter) getContainersLogs(ctx context.Context, w http.Response
 			Tail:       r.Form.Get("tail"),
 			ShowStdout: stdout,
 			ShowStderr: stderr,
+			Details:    httputils.BoolValue(r, "details"),
 		},
 		OutStream: w,
 	}
@@ -130,8 +131,15 @@ func (s *containerRouter) postContainersStart(ctx context.Context, w http.Respon
 	// net/http otherwise seems to swallow any headers related to chunked encoding
 	// including r.TransferEncoding
 	// allow a nil body for backwards compatibility
+
+	version := httputils.VersionFromContext(ctx)
 	var hostConfig *container.HostConfig
-	if r.Body != nil && (r.ContentLength > 0 || r.ContentLength == -1) {
+	// A non-nil json object is at least 7 characters.
+	if r.ContentLength > 7 || r.ContentLength == -1 {
+		if versions.GreaterThanOrEqualTo(version, "1.24") {
+			return validationError{fmt.Errorf("starting container with HostConfig was deprecated since v1.10 and removed in v1.12")}
+		}
+
 		if err := httputils.CheckForJSON(r); err != nil {
 			return err
 		}
@@ -140,11 +148,11 @@ func (s *containerRouter) postContainersStart(ctx context.Context, w http.Respon
 		if err != nil {
 			return err
 		}
-
 		hostConfig = c
 	}
 
-	if err := s.backend.ContainerStart(vars["name"], hostConfig); err != nil {
+	validateHostname := versions.GreaterThanOrEqualTo(version, "1.24")
+	if err := s.backend.ContainerStart(vars["name"], hostConfig, validateHostname); err != nil {
 		return err
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -196,7 +204,7 @@ func (s *containerRouter) postContainersKill(ctx context.Context, w http.Respons
 		// Return error if the container is not running and the api is >= 1.20
 		// to keep backwards compatibility.
 		version := httputils.VersionFromContext(ctx)
-		if version.GreaterThanOrEqualTo("1.20") || !isStopped {
+		if versions.GreaterThanOrEqualTo(version, "1.20") || !isStopped {
 			return fmt.Errorf("Cannot kill container %s: %v", name, err)
 		}
 	}
@@ -304,6 +312,7 @@ func (s *containerRouter) postContainerUpdate(ctx context.Context, w http.Respon
 		return err
 	}
 
+	version := httputils.VersionFromContext(ctx)
 	var updateConfig container.UpdateConfig
 
 	decoder := json.NewDecoder(r.Body)
@@ -317,7 +326,8 @@ func (s *containerRouter) postContainerUpdate(ctx context.Context, w http.Respon
 	}
 
 	name := vars["name"]
-	warnings, err := s.backend.ContainerUpdate(name, hostConfig)
+	validateHostname := versions.GreaterThanOrEqualTo(version, "1.24")
+	warnings, err := s.backend.ContainerUpdate(name, hostConfig, validateHostname)
 	if err != nil {
 		return err
 	}
@@ -342,15 +352,16 @@ func (s *containerRouter) postContainersCreate(ctx context.Context, w http.Respo
 		return err
 	}
 	version := httputils.VersionFromContext(ctx)
-	adjustCPUShares := version.LessThan("1.19")
+	adjustCPUShares := versions.LessThan(version, "1.19")
 
+	validateHostname := versions.GreaterThanOrEqualTo(version, "1.24")
 	ccr, err := s.backend.ContainerCreate(types.ContainerCreateConfig{
 		Name:             name,
 		Config:           config,
 		HostConfig:       hostConfig,
 		NetworkingConfig: networkingConfig,
 		AdjustCPUShares:  adjustCPUShares,
-	})
+	}, validateHostname)
 	if err != nil {
 		return err
 	}
@@ -408,15 +419,7 @@ func (s *containerRouter) postContainersAttach(ctx context.Context, w http.Respo
 	containerName := vars["name"]
 
 	_, upgrade := r.Header["Upgrade"]
-
-	keys := []byte{}
 	detachKeys := r.FormValue("detachKeys")
-	if detachKeys != "" {
-		keys, err = term.ToBytes(detachKeys)
-		if err != nil {
-			logrus.Warnf("Invalid escape keys provided (%s) using default : ctrl-p ctrl-q", detachKeys)
-		}
-	}
 
 	hijacker, ok := w.(http.Hijacker)
 	if !ok {
@@ -452,11 +455,24 @@ func (s *containerRouter) postContainersAttach(ctx context.Context, w http.Respo
 		UseStderr:  httputils.BoolValue(r, "stderr"),
 		Logs:       httputils.BoolValue(r, "logs"),
 		Stream:     httputils.BoolValue(r, "stream"),
-		DetachKeys: keys,
+		DetachKeys: detachKeys,
 		MuxStreams: true,
 	}
 
-	return s.backend.ContainerAttach(containerName, attachConfig)
+	if err = s.backend.ContainerAttach(containerName, attachConfig); err != nil {
+		logrus.Errorf("Handler for %s %s returned error: %v", r.Method, r.URL.Path, err)
+		// Remember to close stream if error happens
+		conn, _, errHijack := hijacker.Hijack()
+		if errHijack == nil {
+			statusCode := httputils.GetHTTPErrorStatusCode(err)
+			statusText := http.StatusText(statusCode)
+			fmt.Fprintf(conn, "HTTP/1.1 %d %s\r\nContent-Type: application/vnd.docker.raw-stream\r\n\r\n%s\r\n", statusCode, statusText, err.Error())
+			httputils.CloseStreams(conn)
+		} else {
+			logrus.Errorf("Error Hijacking: %v", err)
+		}
+	}
+	return nil
 }
 
 func (s *containerRouter) wsContainersAttach(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
@@ -465,15 +481,8 @@ func (s *containerRouter) wsContainersAttach(ctx context.Context, w http.Respons
 	}
 	containerName := vars["name"]
 
-	var keys []byte
 	var err error
 	detachKeys := r.FormValue("detachKeys")
-	if detachKeys != "" {
-		keys, err = term.ToBytes(detachKeys)
-		if err != nil {
-			logrus.Warnf("Invalid escape keys provided (%s) using default : ctrl-p ctrl-q", detachKeys)
-		}
-	}
 
 	done := make(chan struct{})
 	started := make(chan struct{})
@@ -499,7 +508,7 @@ func (s *containerRouter) wsContainersAttach(ctx context.Context, w http.Respons
 		GetStreams: setupStreams,
 		Logs:       httputils.BoolValue(r, "logs"),
 		Stream:     httputils.BoolValue(r, "stream"),
-		DetachKeys: keys,
+		DetachKeys: detachKeys,
 		UseStdin:   true,
 		UseStdout:  true,
 		UseStderr:  true,

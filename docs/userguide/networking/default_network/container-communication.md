@@ -37,11 +37,14 @@ or to turn it on manually:
   net.ipv4.conf.all.forwarding = 1
 ```
 
+> **Note**: this setting does not affect containers that use the host
+> network stack (`--net=host`).
+
 Many using Docker will want `ip_forward` to be on, to at least make
 communication _possible_ between containers and the wider world. May also be
 needed for inter-container communication if you are in a multiple bridge setup.
 
-Docker will   never make changes to your system `iptables` rules if you set
+Docker will never make changes to your system `iptables` rules if you set
 `--iptables=false` when the daemon starts.  Otherwise the Docker server will
 append forwarding rules to the `DOCKER` filter chain.
 
@@ -58,6 +61,8 @@ could be added:
 ```
 $ iptables -I DOCKER -i ext_if ! -s 8.8.8.8 -j DROP
 ```
+
+where *ext_if* is the name of the interface providing external connectivity to the host.
 
 ##  Communication between containers
 

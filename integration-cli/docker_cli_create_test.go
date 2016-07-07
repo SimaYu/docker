@@ -25,7 +25,7 @@ func (s *DockerSuite) TestCreateArgs(c *check.C) {
 	if daemonPlatform == "windows" {
 		c.Skip("Fails on Windows CI")
 	}
-	out, _ := dockerCmd(c, "create", "busybox", "command", "arg1", "arg2", "arg with space")
+	out, _ := dockerCmd(c, "create", "busybox", "command", "arg1", "arg2", "arg with space", "-c", "flags")
 
 	cleanedContainerID := strings.TrimSpace(out)
 
@@ -47,7 +47,7 @@ func (s *DockerSuite) TestCreateArgs(c *check.C) {
 	c.Assert(string(cont.Path), checker.Equals, "command", check.Commentf("Unexpected container path. Expected command, received: %s", cont.Path))
 
 	b := false
-	expected := []string{"arg1", "arg2", "arg with space"}
+	expected := []string{"arg1", "arg2", "arg with space", "-c", "flags"}
 	for i, arg := range expected {
 		if arg != cont.Args[i] {
 			b = true
@@ -68,15 +68,15 @@ func (s *DockerSuite) TestCreateGrowRootfs(c *check.C) {
 	cleanedContainerID := strings.TrimSpace(out)
 
 	inspectOut := inspectField(c, cleanedContainerID, "HostConfig.StorageOpt")
-	c.Assert(inspectOut, checker.Equals, "[size=120G]")
+	c.Assert(inspectOut, checker.Equals, "map[size:120G]")
 }
 
 // Make sure we cannot shrink the container's rootfs at creation time.
 func (s *DockerSuite) TestCreateShrinkRootfs(c *check.C) {
 	testRequires(c, Devicemapper)
 
-	// Ensure this fails
-	out, _, err := dockerCmdWithError("create", "--storage-opt", "size=80G", "busybox")
+	// Ensure this fails because of the defaultBaseFsSize is 10G
+	out, _, err := dockerCmdWithError("create", "--storage-opt", "size=5G", "busybox")
 	c.Assert(err, check.NotNil, check.Commentf(out))
 	c.Assert(out, checker.Contains, "Container size cannot be smaller than")
 }

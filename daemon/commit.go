@@ -80,6 +80,25 @@ func merge(userConf, imageConf *containertypes.Config) error {
 			userConf.Entrypoint = imageConf.Entrypoint
 		}
 	}
+	if imageConf.Healthcheck != nil {
+		if userConf.Healthcheck == nil {
+			userConf.Healthcheck = imageConf.Healthcheck
+		} else {
+			if len(userConf.Healthcheck.Test) == 0 {
+				userConf.Healthcheck.Test = imageConf.Healthcheck.Test
+			}
+			if userConf.Healthcheck.Interval == 0 {
+				userConf.Healthcheck.Interval = imageConf.Healthcheck.Interval
+			}
+			if userConf.Healthcheck.Timeout == 0 {
+				userConf.Healthcheck.Timeout = imageConf.Healthcheck.Timeout
+			}
+			if userConf.Healthcheck.Retries == 0 {
+				userConf.Healthcheck.Retries = imageConf.Healthcheck.Retries
+			}
+		}
+	}
+
 	if userConf.WorkingDir == "" {
 		userConf.WorkingDir = imageConf.WorkingDir
 	}
@@ -138,6 +157,8 @@ func (daemon *Daemon) Commit(name string, c *backend.ContainerCommitConfig) (str
 
 	var history []image.History
 	rootFS := image.NewRootFS()
+	osVersion := ""
+	var osFeatures []string
 
 	if container.ImageID != "" {
 		img, err := daemon.imageStore.Get(container.ImageID)
@@ -146,6 +167,8 @@ func (daemon *Daemon) Commit(name string, c *backend.ContainerCommitConfig) (str
 		}
 		history = img.History
 		rootFS = img.RootFS
+		osVersion = img.OSVersion
+		osFeatures = img.OSFeatures
 	}
 
 	l, err := daemon.layerStore.Register(rwTar, rootFS.ChainID())
@@ -180,8 +203,10 @@ func (daemon *Daemon) Commit(name string, c *backend.ContainerCommitConfig) (str
 			Author:          c.Author,
 			Created:         h.Created,
 		},
-		RootFS:  rootFS,
-		History: history,
+		RootFS:     rootFS,
+		History:    history,
+		OSFeatures: osFeatures,
+		OSVersion:  osVersion,
 	})
 
 	if err != nil {
@@ -209,7 +234,7 @@ func (daemon *Daemon) Commit(name string, c *backend.ContainerCommitConfig) (str
 				return "", err
 			}
 		}
-		if err := daemon.TagImage(newTag, id.String()); err != nil {
+		if err := daemon.TagImageWithReference(id, newTag); err != nil {
 			return "", err
 		}
 	}

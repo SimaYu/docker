@@ -57,18 +57,10 @@ func StdStreams() (stdIn io.ReadCloser, stdOut, stdErr io.Writer) {
 // console which supports ANSI emulation, or fall-back to the golang emulator
 // (github.com/azure/go-ansiterm).
 func useNativeConsole() bool {
-	osv, err := system.GetOSVersion()
-	if err != nil {
-		return false
-	}
+	osv := system.GetOSVersion()
 
 	// Native console is not available before major version 10
 	if osv.MajorVersion < 10 {
-		return false
-	}
-
-	// Must have a late pre-release TP4 build of Windows Server 2016/Windows 10 TH2 or later
-	if osv.Build < 10578 {
 		return false
 	}
 
@@ -91,11 +83,13 @@ func useNativeConsole() bool {
 		return false
 	}
 
-	// TODO Windows. The native emulator still has issues which
-	// mean it shouldn't be enabled for everyone. Change this next line to true
-	// to change the default to "enable if available". In the meantime, users
-	// can still try it out by using USE_NATIVE_CONSOLE env variable.
-	return false
+	// Must have a post-TP5 RS1 build of Windows Server 2016/Windows 10 for
+	// the native console to be usable.
+	if osv.Build < 14350 {
+		return false
+	}
+
+	return true
 }
 
 // getNativeConsole returns the console modes ('state') for the native Windows console
